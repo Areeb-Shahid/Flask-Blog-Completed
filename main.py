@@ -9,7 +9,7 @@ from functools import wraps
 from werkzeug.security import generate_password_hash, check_password_hash
 from sqlalchemy.orm import relationship
 # Import your forms from the forms.py
-from forms import CreatePostForm, RegisterForm, LoginForm
+from forms import CreatePostForm, RegisterForm, LoginForm, CommentForm
 
 '''
 Make sure the required packages are installed: 
@@ -33,33 +33,67 @@ Bootstrap5(app)
 login_manager = LoginManager()
 login_manager.init_app(app)
 
-
 # CONNECT TO DB
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///posts.db'
 db = SQLAlchemy()
 db.init_app(app)
 
+# For adding profile images to the comment section
+gravatar = Gravatar(app,
+                    size=100,
+                    rating='g',
+                    default='retro',
+                    force_default=False,
+                    force_lower=False,
+                    use_ssl=False,
+                    base_url=None)
 
+
+# TODO: Create a User table for all your registered users.
 class User(UserMixin, db.Model):
+    __tablename__ = "users"
     id = db.Column(db.Integer, primary_key=True)
     email = db.Column(db.String(100), unique=True)
     password = db.Column(db.String(100))
-    name = db.Column(db.String(1000))
+    name = db.Column(db.String(100))
+    # This will act like a list of BlogPost objects attached to each User.
+    # The "author" refers to the author property in the BlogPost class.
+    posts = relationship("BlogPost", back_populates="author")
+    # Parent relationship: "comment_author" refers to the comment_author property in the Comment class.
+    comments = relationship("Comment", back_populates="comment_author")
 
 
-# CONFIGURE TABLES
 class BlogPost(db.Model):
     __tablename__ = "blog_posts"
     id = db.Column(db.Integer, primary_key=True)
+    # Create Foreign Key, "users.id" the users refers to the tablename of User.
+    author_id = db.Column(db.Integer, db.ForeignKey("users.id"))
+    # Create reference to the User object. The "posts" refers to the posts property in the User class.
+    author = relationship("User", back_populates="posts")
     title = db.Column(db.String(250), unique=True, nullable=False)
     subtitle = db.Column(db.String(250), nullable=False)
     date = db.Column(db.String(250), nullable=False)
     body = db.Column(db.Text, nullable=False)
-    author = db.Column(db.String(250), nullable=False)
     img_url = db.Column(db.String(250), nullable=False)
+    # Parent relationship to the comments
+    comments = relationship("Comment", back_populates="parent_post")
 
 
-# TODO: Create a User table for all your registered users. 
+
+
+class Comment(db.Model):
+    __tablename__ = "comments"
+    id = db.Column(db.Integer, primary_key=True)
+    text = db.Column(db.Text, nullable=False)
+    # Child relationship:"users.id" The users refers to the tablename of the User class.
+    # "comments" refers to the comments property in the User class.
+    author_id = db.Column(db.Integer, db.ForeignKey("users.id"))
+    comment_author = relationship("User", back_populates="comments")
+    # Child Relationship to the BlogPosts
+    post_id = db.Column(db.Integer, db.ForeignKey("blog_posts.id"))
+    parent_post = relationship("BlogPost", back_populates="comments")
+
+
 
 
 with app.app_context():
@@ -71,20 +105,20 @@ def load_user(user_id):
     return db.get_or_404(User, user_id)
 
 
-def admin_only(f):
-    @wraps(f)
+def admin_only(view_func):
+    @wraps(view_func)
     def decorated_function(*args, **kwargs):
         # If id is not 1 then return abort with 403 error
         if current_user.id != 1:
             return abort(403)
         # Otherwise continue with the route function
-        return f(*args, **kwargs)
+        return view_func(*args, **kwargs)
+
     return decorated_function
 
 
 # TODO: Use Werkzeug to hash the user's password when creating a new user.
 @app.route('/register', methods=["GET", "POST"])
-@admin_only
 def register():
     form = RegisterForm()
     if form.validate_on_submit():
@@ -112,8 +146,6 @@ def register():
         return redirect(url_for("get_all_posts"))
 
     return render_template("register.html", form=form)
-
-
 
 
 # TODO: Retrieve a user from the database based on their email.
@@ -149,14 +181,34 @@ def get_all_posts():
 
 
 # TODO: Allow logged-in users to comment on posts
-@app.route("/post/<int:post_id>")
+
+# Add the CommentForm to the route
+@app.route("/post/<int:post_id>", methods=["GET", "POST"])
 def show_post(post_id):
     requested_post = db.get_or_404(BlogPost, post_id)
-    return render_template("post.html", post=requested_post)
+    # Add the CommentForm to the route
+    comment_form = CommentForm()
+    # Only allow logged-in users to comment on posts
+    if comment_form.validate_on_submit():
+        if not current_user.is_authenticated:
+            flash("You need to login or register to comment.")
+            return redirect(url_for("login"))
+
+        new_comment = Comment(
+            text=comment_form.comment_text.data,
+            comment_author=current_user,
+            parent_post=requested_post
+        )
+        db.session.add(new_comment)
+        db.session.commit()
+
+    return render_template("post.html", post=requested_post, current_user=current_user, form=comment_form)
+
 
 
 # TODO: Use a decorator so only an admin user can create a new post
 @app.route("/new-post", methods=["GET", "POST"])
+@admin_only
 def add_new_post():
     form = CreatePostForm()
     if form.validate_on_submit():
@@ -207,6 +259,17 @@ def delete_post(post_id):
     return redirect(url_for('get_all_posts'))
 
 
+@app.route("/delete_comment/<int:comment_id>")
+def delete_comment(comment_id):
+    comment = Comment.query.get_or_404(comment_id)
+    parent_post_id = comment.parent_post.id
+    db.session.delete(comment)
+    db.session.commit()
+    flash("Comment deleted successfully.", "success")
+
+    return redirect(url_for("show_post", post_id=parent_post_id))
+
+
 @app.route("/about")
 def about():
     return render_template("about.html")
@@ -218,4 +281,4 @@ def contact():
 
 
 if __name__ == "__main__":
-    app.run(debug=True, port=5002)
+    app.run(debug=True, port=5001)
